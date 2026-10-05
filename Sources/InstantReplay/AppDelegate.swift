@@ -1,5 +1,4 @@
 import AppKit
-import Carbon.HIToolbox
 import Combine
 import SwiftUI
 
@@ -8,7 +7,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let controller = ReplayController()
     private let popover = NSPopover()
     private var statusItem: NSStatusItem!
-    private var hotKey: HotKey?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -24,10 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostingController.sizingOptions = .preferredContentSize
         popover.contentViewController = hostingController
         popover.behavior = .transient
-
-        hotKey = HotKey(keyCode: kVK_F10, modifiers: optionKey) { [weak self] in
-            self?.controller.saveReplay()
-        }
 
         controller.$state
             .sink { [weak self] state in self?.updateIcon(for: state) }

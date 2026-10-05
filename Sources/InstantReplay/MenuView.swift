@@ -1,3 +1,5 @@
+import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 struct MenuView: View {
@@ -47,7 +49,7 @@ struct MenuView: View {
                     Image(systemName: "square.and.arrow.down")
                     Text(Settings.saveActionLabel(controller.bufferSeconds))
                     Spacer()
-                    Text("⌥F10").foregroundStyle(.secondary)
+                    Text(controller.shortcut.displayString).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -161,6 +163,17 @@ struct MenuView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Save shortcut")
+                Spacer()
+                ShortcutField(controller: controller)
+            }
+            if let shortcutError = controller.shortcutError {
+                Text(shortcutError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Toggle("Launch at login", isOn: Binding(
                 get: { controller.launchAtLogin },
                 set: { controller.setLaunchAtLogin($0) }
@@ -237,5 +250,80 @@ struct MenuView: View {
         case .recording: "Recording · \(controller.quality.label) · \(controller.frameRate) fps · \(controller.codec.label)"
         case .saving: "Saving clip…"
         }
+    }
+}
+
+struct ShortcutField: View {
+    @ObservedObject var controller: ReplayController
+    @StateObject private var monitor = KeyDownMonitor()
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button {
+                controller.isRecordingShortcut ? cancelRecording() : startRecording()
+            } label: {
+                Text(controller.isRecordingShortcut ? "Press keys…" : controller.shortcut.displayString)
+                    .monospacedDigit()
+                    .frame(minWidth: 90)
+            }
+            .help(controller.isRecordingShortcut ? "Press a new shortcut, or Esc to cancel" : "Click to change the shortcut")
+
+            if !controller.isRecordingShortcut && controller.shortcut != .default {
+                Button {
+                    controller.resetShortcut()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Reset to \(Shortcut.default.displayString)")
+            }
+        }
+        .onDisappear(perform: cancelRecording)
+    }
+
+    private func startRecording() {
+        controller.beginShortcutRecording()
+        monitor.start { event in
+            MainActor.assumeIsolated { handle(event) }
+            return nil
+        }
+    }
+
+    private func cancelRecording() {
+        monitor.stop()
+        controller.cancelShortcutRecording()
+    }
+
+    private func handle(_ event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if Int(event.keyCode) == kVK_Escape && modifiers.isEmpty {
+            cancelRecording()
+            return
+        }
+        guard let shortcut = Shortcut(event: event) else {
+            NSSound.beep()
+            return
+        }
+        monitor.stop()
+        controller.applyShortcut(shortcut)
+    }
+}
+
+final class KeyDownMonitor: ObservableObject {
+    private var token: Any?
+
+    func start(handler: @escaping (NSEvent) -> NSEvent?) {
+        stop()
+        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    func stop() {
+        guard let token else { return }
+        NSEvent.removeMonitor(token)
+        self.token = nil
+    }
+
+    deinit {
+        stop()
     }
 }

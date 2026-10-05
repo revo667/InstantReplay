@@ -18,6 +18,9 @@ final class ReplayController: ObservableObject {
     @Published private(set) var needsPermission = false
     @Published private(set) var launchAtLogin = false
     @Published private(set) var launchAtLoginNeedsApproval = false
+    @Published private(set) var shortcut = Shortcut.load()
+    @Published private(set) var isRecordingShortcut = false
+    @Published private(set) var shortcutError: String?
 
     @Published var bufferSeconds: Int {
         didSet {
@@ -87,6 +90,7 @@ final class ReplayController: ObservableObject {
     private var backgroundActivity: NSObjectProtocol?
     private var observers: [NSObjectProtocol] = []
     private var activeCodec = VideoCodec.hevc
+    private var hotKey: HotKey?
 
     init() {
         let storedSeconds: Int = Preferences.value(Preferences.bufferSeconds, default: 30)
@@ -110,6 +114,7 @@ final class ReplayController: ObservableObject {
 
     func launch() {
         configureLaunchAtLoginOnFirstRun()
+        registerHotKey()
         observeSystemEvents()
         watchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.ensureCaptureAlive() }
@@ -176,6 +181,36 @@ final class ReplayController: ObservableObject {
         }
     }
 
+    func beginShortcutRecording() {
+        isRecordingShortcut = true
+        hotKey = nil
+    }
+
+    func cancelShortcutRecording() {
+        guard isRecordingShortcut else { return }
+        isRecordingShortcut = false
+        registerHotKey()
+    }
+
+    func applyShortcut(_ newShortcut: Shortcut) {
+        isRecordingShortcut = false
+        hotKey = nil
+        guard let registered = makeHotKey(for: newShortcut) else {
+            NSSound.beep()
+            registerHotKey()
+            shortcutError = "\(newShortcut.displayString) is already taken by another app."
+            return
+        }
+        hotKey = registered
+        shortcut = newShortcut
+        shortcut.save()
+        shortcutError = nil
+    }
+
+    func resetShortcut() {
+        applyShortcut(.default)
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {
@@ -225,6 +260,19 @@ final class ReplayController: ObservableObject {
             bitRateMbps: roundedBitRateMbps,
             includeMicrophone: includesMicrophone
         )
+    }
+
+    private func registerHotKey() {
+        hotKey = makeHotKey(for: shortcut)
+        shortcutError = hotKey == nil
+            ? "\(shortcut.displayString) is already taken by another app. Pick a different shortcut."
+            : nil
+    }
+
+    private func makeHotKey(for shortcut: Shortcut) -> HotKey? {
+        HotKey(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers) { [weak self] in
+            self?.saveReplay()
+        }
     }
 
     private func restartIfRunning() {

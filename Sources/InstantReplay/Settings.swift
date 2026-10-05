@@ -112,6 +112,8 @@ enum Preferences {
     static let microphoneVolume = "microphoneVolume"
     static let captureEnabled = "captureEnabled"
     static let didConfigureLaunchAtLogin = "didConfigureLaunchAtLogin"
+    static let shortcutKeyCode = "shortcutKeyCode"
+    static let shortcutModifiers = "shortcutModifiers"
 
     static func value<T>(_ key: String, default fallback: T) -> T {
         UserDefaults.standard.object(forKey: key) as? T ?? fallback

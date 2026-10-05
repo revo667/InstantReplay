@@ -16,7 +16,7 @@ If you've used NVIDIA's <kbd>Alt</kbd>+<kbd>F10</kbd> on Windows, you know how i
 ## Features
 
 - **Always-on replay buffer.** Choose how much to keep: 15 s, 30 s, 1 min, 2 min or 5 min. Encoded frames are held in RAM, so nothing is written to disk until you save.
-- **Instant save.** <kbd>⌥</kbd> + <kbd>F10</kbd> is a global hotkey that also works inside fullscreen games. Video is written without re-encoding, so a 30-second clip saves in well under a second.
+- **Instant save.** <kbd>⌥</kbd> + <kbd>F10</kbd> by default, rebindable from the panel. It's a global hotkey that also works inside fullscreen games. Video is written without re-encoding, so a 30-second clip saves in well under a second.
 - **Records everything on screen.** It captures the full display, so games, fullscreen Spaces, every window and the cursor all end up in the clip.
 - **Codecs, ordered from fastest to highest quality:**
 
@@ -58,6 +58,7 @@ On first launch, macOS asks for **Screen & System Audio Recording** permission. 
 | Action | How |
 |---|---|
 | Save a replay | <kbd>⌥</kbd> + <kbd>F10</kbd>, or **Save last …** in the panel |
+| Change the hotkey | Click the shortcut next to **Save shortcut**, press the new combo (<kbd>Esc</kbd> cancels, ↺ resets) |
 | Settings | Click the ⏺ icon in the menu bar |
 | Find clips | `~/Movies/InstantReplay/Replay_YYYY-MM-DD_HH-MM-SS.mp4` |
 
@@ -84,6 +85,7 @@ ScreenCaptureKit ──► VideoToolbox encoder ──► ReplayBuffer (RAM, GOP
 | `ReplayController.swift` | Holds state, settings and the watchdog, and handles sleep/wake and the login agent |
 | `MenuView.swift` | The SwiftUI menu bar panel |
 | `HotKey.swift` | Global hotkey via Carbon `RegisterEventHotKey`, so it doesn't need Accessibility permission |
+| `Shortcut.swift` | User-configurable shortcut: capture from key events, layout-aware labels, persistence |
 
 ## Memory usage
 
