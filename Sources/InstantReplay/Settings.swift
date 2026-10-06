@@ -98,6 +98,22 @@ struct CaptureOptions {
     let frameRate: Int
     let bitRateMbps: Int
     let includeMicrophone: Bool
+    let microphoneID: String?
+}
+
+struct AudioInput: Identifiable, Hashable {
+    let id: String
+    let name: String
+
+    static func available() -> [AudioInput] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        .devices
+        .map { AudioInput(id: $0.uniqueID, name: $0.localizedName) }
+    }
 }
 
 enum Preferences {
@@ -110,10 +126,13 @@ enum Preferences {
     static let systemVolume = "systemVolume"
     static let includesMicrophone = "capturesMicrophone"
     static let microphoneVolume = "microphoneVolume"
+    static let microphoneID = "microphoneID"
     static let captureEnabled = "captureEnabled"
     static let didConfigureLaunchAtLogin = "didConfigureLaunchAtLogin"
     static let shortcutKeyCode = "shortcutKeyCode"
     static let shortcutModifiers = "shortcutModifiers"
+    static let recordShortcutKeyCode = "recordShortcutKeyCode"
+    static let recordShortcutModifiers = "recordShortcutModifiers"
 
     static func value<T>(_ key: String, default fallback: T) -> T {
         UserDefaults.standard.object(forKey: key) as? T ?? fallback
@@ -139,9 +158,29 @@ enum Settings {
     }
 
     static func newClipURL(fileExtension: String) -> URL {
+        outputDirectory.appendingPathComponent("Replay_\(timestamp()).\(fileExtension)")
+    }
+
+    static func newRecordingBaseName() -> String {
+        let stem = "Recording_\(timestamp())"
+        var candidate = stem
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: recordingURL(baseName: candidate, part: 1).path) {
+            candidate = "\(stem)-\(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+
+    static func recordingURL(baseName: String, part: Int) -> URL {
+        let name = part > 1 ? "\(baseName)_part\(part)" : baseName
+        return outputDirectory.appendingPathComponent("\(name).mov")
+    }
+
+    private static func timestamp() -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        return outputDirectory.appendingPathComponent("Replay_\(formatter.string(from: Date())).\(fileExtension)")
+        return formatter.string(from: Date())
     }
 
     static func durationLabel(_ seconds: Int) -> String {

@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import CoreGraphics
 import ServiceManagement
 
@@ -18,9 +19,10 @@ final class ReplayController: ObservableObject {
     @Published private(set) var needsPermission = false
     @Published private(set) var launchAtLogin = false
     @Published private(set) var launchAtLoginNeedsApproval = false
-    @Published private(set) var shortcut = Shortcut.load()
-    @Published private(set) var isRecordingShortcut = false
-    @Published private(set) var shortcutError: String?
+    @Published private(set) var shortcuts = Dictionary(uniqueKeysWithValues: ShortcutAction.allCases.map { ($0, Shortcut.load(for: $0)) })
+    @Published private(set) var editingShortcut: ShortcutAction?
+    @Published private(set) var shortcutErrors: [ShortcutAction: String] = [:]
+    @Published private(set) var recordingStartedAt: Date?
 
     @Published var bufferSeconds: Int {
         didSet {
@@ -61,26 +63,47 @@ final class ReplayController: ObservableObject {
     }
 
     @Published var includesSystemAudio: Bool {
-        didSet { Preferences.set(includesSystemAudio, for: Preferences.includesSystemAudio) }
+        didSet {
+            Preferences.set(includesSystemAudio, for: Preferences.includesSystemAudio)
+            recorder.updateMix(currentMix)
+        }
     }
 
     @Published var systemVolume: Double {
-        didSet { Preferences.set(systemVolume, for: Preferences.systemVolume) }
+        didSet {
+            Preferences.set(systemVolume, for: Preferences.systemVolume)
+            recorder.updateMix(currentMix)
+        }
     }
 
     @Published var includesMicrophone: Bool {
         didSet {
             guard includesMicrophone != oldValue else { return }
             Preferences.set(includesMicrophone, for: Preferences.includesMicrophone)
+            recorder.updateMix(currentMix)
             restartIfRunning()
         }
     }
 
     @Published var microphoneVolume: Double {
-        didSet { Preferences.set(microphoneVolume, for: Preferences.microphoneVolume) }
+        didSet {
+            Preferences.set(microphoneVolume, for: Preferences.microphoneVolume)
+            recorder.updateMix(currentMix)
+        }
+    }
+
+    @Published private(set) var microphones: [AudioInput] = []
+
+    @Published var microphoneID: String {
+        didSet {
+            guard microphoneID != oldValue else { return }
+            Preferences.set(microphoneID, for: Preferences.microphoneID)
+            if includesMicrophone { restartIfRunning() }
+        }
     }
 
     private let buffer: ReplayBuffer
+    private let recorder = MovieRecorder()
     private let engine: CaptureEngine
     private let loginAgent = SMAppService.agent(plistName: "com.yildiz.InstantReplay.agent.plist")
     private var operation: Task<Void, Never>?
@@ -90,7 +113,7 @@ final class ReplayController: ObservableObject {
     private var backgroundActivity: NSObjectProtocol?
     private var observers: [NSObjectProtocol] = []
     private var activeCodec = VideoCodec.hevc
-    private var hotKey: HotKey?
+    private var hotKeys: [ShortcutAction: HotKey] = [:]
 
     init() {
         let storedSeconds: Int = Preferences.value(Preferences.bufferSeconds, default: 30)
@@ -103,18 +126,26 @@ final class ReplayController: ObservableObject {
         systemVolume = Preferences.value(Preferences.systemVolume, default: 1)
         includesMicrophone = Preferences.value(Preferences.includesMicrophone, default: false)
         microphoneVolume = Preferences.value(Preferences.microphoneVolume, default: 1)
+        microphoneID = Preferences.value(Preferences.microphoneID, default: "")
+        microphones = AudioInput.available()
 
         buffer = ReplayBuffer(seconds: storedSeconds)
-        engine = CaptureEngine(buffer: buffer)
+        engine = CaptureEngine(buffer: buffer, recorder: recorder)
         engine.onUnexpectedStop = { [weak self] _ in
             Task { @MainActor in self?.recoverFromStop() }
+        }
+        recorder.onSegmentFinished = { [weak self] url, error in
+            Task { @MainActor in self?.recordingSegmentFinished(url, error: error) }
+        }
+        recorder.onFailure = { [weak self] error in
+            Task { @MainActor in self?.recordingFailed(error) }
         }
         refreshLaunchAtLoginStatus()
     }
 
     func launch() {
         configureLaunchAtLoginOnFirstRun()
-        registerHotKey()
+        registerHotKeys()
         observeSystemEvents()
         watchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.ensureCaptureAlive() }
@@ -132,10 +163,18 @@ final class ReplayController: ObservableObject {
         Int(effectiveBitRateMbps * Double(bufferSeconds + 1) / 8)
     }
 
+    var recordingMegabytesPerMinute: Int {
+        Int(effectiveBitRateMbps * 60 / 8)
+    }
+
     var effectiveBitRateMbps: Double {
         guard !codec.usesBitRate else { return Double(roundedBitRateMbps) }
         let size = Settings.outputSize(native: Settings.mainDisplayPixelSize(), quality: quality, codec: codec)
         return Double(size.width * size.height * frameRate) * Settings.proResBitsPerPixel / 1_000_000
+    }
+
+    var isRecording: Bool {
+        recordingStartedAt != nil
     }
 
     func setCaptureEnabled(_ enabled: Bool) {
@@ -145,26 +184,54 @@ final class ReplayController: ObservableObject {
     func start() {
         wantsCapture = true
         Preferences.set(true, for: Preferences.captureEnabled)
+        buffer.setEnabled(true)
         enqueue { [weak self] in await self?.performStart() }
     }
 
     func stop() {
         wantsCapture = false
         Preferences.set(false, for: Preferences.captureEnabled)
-        enqueue { [weak self] in await self?.performStop() }
+        buffer.setEnabled(false)
+        stopEngineIfUnused()
+    }
+
+    func toggleRecording() {
+        isRecording ? stopRecording() : startRecording()
+    }
+
+    func startRecording() {
+        guard !isRecording, !needsPermission else {
+            NSSound.beep()
+            return
+        }
+        recordingStartedAt = Date()
+        recorder.start(baseName: Settings.newRecordingBaseName(), mix: currentMix)
+        NSSound(named: "Tink")?.play()
+        if state == .off || !engine.isRunning {
+            enqueue { [weak self] in await self?.performStart() }
+        }
+    }
+
+    func stopRecording() {
+        guard isRecording else { return }
+        recordingStartedAt = nil
+        enqueue { [weak self] in
+            guard let self else { return }
+            await self.recorder.finish()
+            NSSound(named: "Glass")?.play()
+            guard !self.needsEngine else { return }
+            await self.performStop()
+        }
     }
 
     func saveReplay() {
-        guard state == .recording else {
+        guard state == .recording, wantsCapture else {
             NSSound.beep()
             return
         }
         state = .saving
         let snapshot = buffer.snapshot()
-        let mix = ClipAudioMix(
-            systemGain: includesSystemAudio ? Float(systemVolume) : nil,
-            microphoneGain: includesMicrophone ? Float(microphoneVolume) : nil
-        )
+        let mix = currentMix
         let clipCodec = activeCodec
         let url = Settings.newClipURL(fileExtension: clipCodec.fileExtension)
         Task {
@@ -181,34 +248,45 @@ final class ReplayController: ObservableObject {
         }
     }
 
-    func beginShortcutRecording() {
-        isRecordingShortcut = true
-        hotKey = nil
+    func shortcut(for action: ShortcutAction) -> Shortcut {
+        shortcuts[action] ?? action.defaultShortcut
     }
 
-    func cancelShortcutRecording() {
-        guard isRecordingShortcut else { return }
-        isRecordingShortcut = false
-        registerHotKey()
+    func beginShortcutEditing(_ action: ShortcutAction) {
+        cancelShortcutEditing()
+        editingShortcut = action
+        hotKeys[action] = nil
     }
 
-    func applyShortcut(_ newShortcut: Shortcut) {
-        isRecordingShortcut = false
-        hotKey = nil
-        guard let registered = makeHotKey(for: newShortcut) else {
+    func cancelShortcutEditing() {
+        guard let action = editingShortcut else { return }
+        editingShortcut = nil
+        registerHotKey(for: action)
+    }
+
+    func applyShortcut(_ newShortcut: Shortcut, for action: ShortcutAction) {
+        editingShortcut = nil
+        hotKeys[action] = nil
+        if let other = ShortcutAction.allCases.first(where: { $0 != action && shortcut(for: $0) == newShortcut }) {
             NSSound.beep()
-            registerHotKey()
-            shortcutError = "\(newShortcut.displayString) is already taken by another app."
+            registerHotKey(for: action)
+            shortcutErrors[action] = "\(newShortcut.displayString) is already used for \(other.actionName)."
             return
         }
-        hotKey = registered
-        shortcut = newShortcut
-        shortcut.save()
-        shortcutError = nil
+        guard let registered = makeHotKey(for: newShortcut, action: action) else {
+            NSSound.beep()
+            registerHotKey(for: action)
+            shortcutErrors[action] = "\(newShortcut.displayString) is already taken by another app."
+            return
+        }
+        hotKeys[action] = registered
+        shortcuts[action] = newShortcut
+        newShortcut.save(for: action)
+        shortcutErrors[action] = nil
     }
 
-    func resetShortcut() {
-        applyShortcut(.default)
+    func resetShortcut(for action: ShortcutAction) {
+        applyShortcut(action.defaultShortcut, for: action)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -244,12 +322,25 @@ final class ReplayController: ObservableObject {
 
     func stopForTermination() {
         let engine = engine
+        let recorder = recorder
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
+            await recorder.finish()
             await engine.stop()
             semaphore.signal()
         }
-        _ = semaphore.wait(timeout: .now() + 2)
+        _ = semaphore.wait(timeout: .now() + 10)
+    }
+
+    private var needsEngine: Bool {
+        wantsCapture || isRecording
+    }
+
+    private var currentMix: ClipAudioMix {
+        ClipAudioMix(
+            systemGain: includesSystemAudio ? Float(systemVolume) : nil,
+            microphoneGain: includesMicrophone ? Float(microphoneVolume) : nil
+        )
     }
 
     private var currentOptions: CaptureOptions {
@@ -258,26 +349,76 @@ final class ReplayController: ObservableObject {
             codec: codec,
             frameRate: frameRate,
             bitRateMbps: roundedBitRateMbps,
-            includeMicrophone: includesMicrophone
+            includeMicrophone: includesMicrophone,
+            microphoneID: selectedMicrophone?.id
         )
     }
 
-    private func registerHotKey() {
-        hotKey = makeHotKey(for: shortcut)
-        shortcutError = hotKey == nil
-            ? "\(shortcut.displayString) is already taken by another app. Pick a different shortcut."
+    var selectedMicrophone: AudioInput? {
+        microphones.first { $0.id == microphoneID }
+    }
+
+    func refreshMicrophones() {
+        let available = AudioInput.available()
+        guard available != microphones else { return }
+        let wasAvailable = selectedMicrophone != nil
+        microphones = available
+        if includesMicrophone && !microphoneID.isEmpty && wasAvailable != (selectedMicrophone != nil) {
+            restartIfRunning()
+        }
+    }
+
+    private func registerHotKeys() {
+        ShortcutAction.allCases.forEach(registerHotKey(for:))
+    }
+
+    private func registerHotKey(for action: ShortcutAction) {
+        let current = shortcut(for: action)
+        hotKeys[action] = makeHotKey(for: current, action: action)
+        shortcutErrors[action] = hotKeys[action] == nil
+            ? "\(current.displayString) is already taken by another app. Pick a different shortcut."
             : nil
     }
 
-    private func makeHotKey(for shortcut: Shortcut) -> HotKey? {
+    private func makeHotKey(for shortcut: Shortcut, action: ShortcutAction) -> HotKey? {
         HotKey(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers) { [weak self] in
-            self?.saveReplay()
+            self?.perform(action)
+        }
+    }
+
+    private func perform(_ action: ShortcutAction) {
+        switch action {
+        case .saveReplay: saveReplay()
+        case .toggleRecording: toggleRecording()
         }
     }
 
     private func restartIfRunning() {
-        guard wantsCapture else { return }
-        start()
+        guard needsEngine else { return }
+        enqueue { [weak self] in await self?.performStart() }
+    }
+
+    private func stopEngineIfUnused() {
+        enqueue { [weak self] in
+            guard let self, !self.needsEngine else { return }
+            await self.performStop()
+        }
+    }
+
+    private func recordingSegmentFinished(_ url: URL, error: Error?) {
+        if let error {
+            errorMessage = "Recording could not be finalized: \(error.localizedDescription)"
+            NSSound(named: "Basso")?.play()
+            return
+        }
+        lastClipURL = url
+    }
+
+    private func recordingFailed(_ error: Error) {
+        recordingStartedAt = nil
+        errorMessage = "Recording stopped: \(error.localizedDescription)"
+        NSSound(named: "Basso")?.play()
+        stopEngineIfUnused()
     }
 
     private func enqueue(_ work: @escaping @MainActor () async -> Void) {
@@ -291,7 +432,7 @@ final class ReplayController: ObservableObject {
     }
 
     private func performStart() async {
-        guard wantsCapture else { return }
+        guard needsEngine else { return }
         if !CGPreflightScreenCaptureAccess() && !didRequestPermission {
             didRequestPermission = true
             CGRequestScreenCaptureAccess()
@@ -322,14 +463,14 @@ final class ReplayController: ObservableObject {
     }
 
     private func ensureCaptureAlive() {
-        guard wantsCapture, !needsPermission, !isOperationRunning else { return }
+        guard needsEngine, !needsPermission, !isOperationRunning else { return }
         guard state == .off || !engine.isRunning else { return }
         guard state != .saving else { return }
         enqueue { [weak self] in await self?.performStart() }
     }
 
     private func restartIfDisplayChanged() {
-        guard wantsCapture, let displayID = engine.displayID else { return }
+        guard needsEngine, let displayID = engine.displayID else { return }
         let activeDisplays = activeDisplayIDs()
         guard displayID != CGMainDisplayID() || !activeDisplays.contains(displayID) else { return }
         enqueue { [weak self] in await self?.performStart() }
@@ -365,13 +506,18 @@ final class ReplayController: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.restartIfDisplayChanged() }
         })
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshMicrophones() }
+            })
+        }
     }
 
     private func beginBackgroundActivity() {
         guard backgroundActivity == nil else { return }
         backgroundActivity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
-            reason: "Instant Replay buffer capture"
+            reason: "Instant Replay capture"
         )
     }
 
@@ -398,10 +544,10 @@ final class ReplayController: ObservableObject {
     private func recoverFromStop() {
         state = .off
         endBackgroundActivity()
-        guard wantsCapture else { return }
+        guard needsEngine else { return }
         enqueue { [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            guard let self, self.wantsCapture, !self.engine.isRunning else { return }
+            guard let self, self.needsEngine, !self.engine.isRunning else { return }
             await self.performStart()
         }
     }

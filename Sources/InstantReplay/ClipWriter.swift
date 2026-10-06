@@ -96,7 +96,7 @@ enum ClipWriter {
     }
 }
 
-private extension CMSampleBuffer {
+extension CMSampleBuffer {
     func applyingGain(_ gain: Float) -> CMSampleBuffer {
         guard gain != 1,
               let description = formatDescription?.audioStreamBasicDescription,

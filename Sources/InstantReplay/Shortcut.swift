@@ -1,11 +1,51 @@
 import AppKit
 import Carbon.HIToolbox
 
+enum ShortcutAction: CaseIterable, Identifiable {
+    case saveReplay
+    case toggleRecording
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .saveReplay: "Save shortcut"
+        case .toggleRecording: "Record shortcut"
+        }
+    }
+
+    var actionName: String {
+        switch self {
+        case .saveReplay: "saving replays"
+        case .toggleRecording: "recording"
+        }
+    }
+
+    var defaultShortcut: Shortcut {
+        switch self {
+        case .saveReplay: Shortcut(keyCode: kVK_F10, modifiers: optionKey)
+        case .toggleRecording: Shortcut(keyCode: kVK_F9, modifiers: optionKey)
+        }
+    }
+
+    fileprivate var keyCodeKey: String {
+        switch self {
+        case .saveReplay: Preferences.shortcutKeyCode
+        case .toggleRecording: Preferences.recordShortcutKeyCode
+        }
+    }
+
+    fileprivate var modifiersKey: String {
+        switch self {
+        case .saveReplay: Preferences.shortcutModifiers
+        case .toggleRecording: Preferences.recordShortcutModifiers
+        }
+    }
+}
+
 struct Shortcut: Equatable {
     let keyCode: Int
     let modifiers: Int
-
-    static let `default` = Shortcut(keyCode: kVK_F10, modifiers: optionKey)
 
     private static let functionKeyCodes: [Int: String] = [
         kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4", kVK_F5: "F5",
@@ -54,16 +94,16 @@ struct Shortcut: Equatable {
             ?? "Key \(keyCode)"
     }
 
-    static func load() -> Shortcut {
+    static func load(for action: ShortcutAction) -> Shortcut {
         Shortcut(
-            keyCode: Preferences.value(Preferences.shortcutKeyCode, default: Shortcut.default.keyCode),
-            modifiers: Preferences.value(Preferences.shortcutModifiers, default: Shortcut.default.modifiers)
+            keyCode: Preferences.value(action.keyCodeKey, default: action.defaultShortcut.keyCode),
+            modifiers: Preferences.value(action.modifiersKey, default: action.defaultShortcut.modifiers)
         )
     }
 
-    func save() {
-        Preferences.set(keyCode, for: Preferences.shortcutKeyCode)
-        Preferences.set(modifiers, for: Preferences.shortcutModifiers)
+    func save(for action: ShortcutAction) {
+        Preferences.set(keyCode, for: action.keyCodeKey)
+        Preferences.set(modifiers, for: action.modifiersKey)
     }
 
     private static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> Int {

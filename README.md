@@ -17,6 +17,7 @@ If you've used NVIDIA's <kbd>Alt</kbd>+<kbd>F10</kbd> on Windows, you know how i
 
 - **Always-on replay buffer.** Choose how much to keep: 15 s, 30 s, 1 min, 2 min or 5 min. Encoded frames are held in RAM, so nothing is written to disk until you save.
 - **Instant save.** <kbd>⌥</kbd> + <kbd>F10</kbd> by default, rebindable from the panel. It's a global hotkey that also works inside fullscreen games. Video is written without re-encoding, so a 30-second clip saves in well under a second.
+- **Full recording.** <kbd>⌥</kbd> + <kbd>F9</kbd> (rebindable) or **Start recording** in the panel starts a regular screen recording that streams straight to disk, so it can run for hours without touching RAM. It works with the replay buffer on or off, and both can run at the same time. Recordings are fragmented `.mov` files, so a crash loses at most the last ~10 seconds. If capture restarts mid-recording (sleep/wake, display change, or changing resolution/frame rate/codec/microphone), the recording continues in a new `_part2`, `_part3`, … file.
 - **Records everything on screen.** It captures the full display, so games, fullscreen Spaces, every window and the cursor all end up in the clip.
 - **Codecs, ordered from fastest to highest quality:**
 
@@ -58,9 +59,11 @@ On first launch, macOS asks for **Screen & System Audio Recording** permission. 
 | Action | How |
 |---|---|
 | Save a replay | <kbd>⌥</kbd> + <kbd>F10</kbd>, or **Save last …** in the panel |
-| Change the hotkey | Click the shortcut next to **Save shortcut**, press the new combo (<kbd>Esc</kbd> cancels, ↺ resets) |
+| Start / stop a recording | <kbd>⌥</kbd> + <kbd>F9</kbd>, or **Start recording** in the panel |
+| Change a hotkey | Click the shortcut next to **Save shortcut** or **Record shortcut**, press the new combo (<kbd>Esc</kbd> cancels, ↺ resets) |
 | Settings | Click the ⏺ icon in the menu bar |
 | Find clips | `~/Movies/InstantReplay/Replay_YYYY-MM-DD_HH-MM-SS.mp4` |
+| Find recordings | `~/Movies/InstantReplay/Recording_YYYY-MM-DD_HH-MM-SS.mov` |
 
 When a save succeeds you'll hear the *Glass* sound; if it fails you'll hear *Basso*.
 
@@ -81,6 +84,7 @@ ScreenCaptureKit ──► VideoToolbox encoder ──► ReplayBuffer (RAM, GOP
 | `CaptureEngine.swift` | Configures the `SCStream`: display, size, pixel format, audio and microphone |
 | `VideoEncoder.swift` | `VTCompressionSession` per codec, with a forced keyframe every second and bitrate changes applied live |
 | `ReplayBuffer.swift` | Thread-safe ring buffer that drops whole GOPs so a clip always starts on a keyframe |
+| `MovieRecorder.swift` | Streams encoded frames and AAC audio to a fragmented `.mov` for full recordings, rolling to a new part when capture restarts |
 | `ClipWriter.swift` | Writes video without re-encoding, applies per-track gain with vDSP, and encodes audio to AAC |
 | `ReplayController.swift` | Holds state, settings and the watchdog, and handles sleep/wake and the login agent |
 | `MenuView.swift` | The SwiftUI menu bar panel |

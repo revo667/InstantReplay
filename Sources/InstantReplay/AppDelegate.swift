@@ -24,7 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
 
         controller.$state
-            .sink { [weak self] state in self?.updateIcon(for: state) }
+            .combineLatest(controller.$recordingStartedAt)
+            .sink { [weak self] state, recordingStartedAt in
+                self?.updateIcon(for: state, isRecording: recordingStartedAt != nil)
+            }
             .store(in: &cancellables)
 
         controller.launch()
@@ -50,11 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func updateIcon(for state: ReplayController.State) {
+    private func updateIcon(for state: ReplayController.State, isRecording: Bool) {
         let symbol: String
         switch state {
         case .off: symbol = "record.circle"
         case .starting: symbol = "hourglass.circle"
+        case .recording where isRecording: symbol = "video.circle.fill"
         case .recording: symbol = "record.circle.fill"
         case .saving: symbol = "arrow.down.circle.fill"
         }

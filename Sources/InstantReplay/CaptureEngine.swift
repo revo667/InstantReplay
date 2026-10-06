@@ -18,13 +18,15 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var displayID: CGDirectDisplayID?
 
     private let buffer: ReplayBuffer
+    private let recorder: MovieRecorder
     private var stream: SCStream?
     private var encoder: VideoEncoder?
     private let videoQueue = DispatchQueue(label: "instantreplay.capture.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "instantreplay.capture.audio", qos: .userInteractive)
 
-    init(buffer: ReplayBuffer) {
+    init(buffer: ReplayBuffer, recorder: MovieRecorder) {
         self.buffer = buffer
+        self.recorder = recorder
     }
 
     func start(options: CaptureOptions) async throws {
@@ -52,6 +54,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.channelCount = 2
         configuration.excludesCurrentProcessAudio = true
         configuration.captureMicrophone = options.includeMicrophone
+        configuration.microphoneCaptureDeviceID = options.microphoneID
 
         let encoder = try VideoEncoder(
             codec: options.codec,
@@ -59,8 +62,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
             height: size.height,
             frameRate: options.frameRate,
             bitRate: options.bitRateMbps * 1_000_000
-        ) { [buffer] sample in
+        ) { [buffer, recorder] sample in
             buffer.appendVideo(sample)
+            recorder.appendVideo(sample)
         }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -72,6 +76,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         buffer.reset()
+        recorder.beginNewSegment()
         videoQueue.sync { self.encoder = encoder }
         self.stream = stream
 
@@ -102,9 +107,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         case .screen:
             handleScreenFrame(sampleBuffer)
         case .audio:
-            buffer.appendAudio(sampleBuffer.deepCopiedAudio() ?? sampleBuffer, track: .system)
+            handleAudio(sampleBuffer, track: .system)
         case .microphone:
-            buffer.appendAudio(sampleBuffer.deepCopiedAudio() ?? sampleBuffer, track: .microphone)
+            handleAudio(sampleBuffer, track: .microphone)
         @unknown default:
             break
         }
@@ -122,6 +127,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
               SCFrameStatus(rawValue: rawStatus) == .complete,
               let pixelBuffer = sampleBuffer.imageBuffer else { return }
         encoder?.encode(pixelBuffer, at: sampleBuffer.presentationTimeStamp, duration: sampleBuffer.duration)
+    }
+
+    private func handleAudio(_ sampleBuffer: CMSampleBuffer, track: AudioTrack) {
+        let sample = sampleBuffer.deepCopiedAudio() ?? sampleBuffer
+        buffer.appendAudio(sample, track: track)
+        recorder.appendAudio(sample, track: track)
     }
 
     private func teardown() {

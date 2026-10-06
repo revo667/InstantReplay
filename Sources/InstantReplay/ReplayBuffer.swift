@@ -1,7 +1,7 @@
 import CoreMedia
 import Foundation
 
-enum AudioTrack {
+enum AudioTrack: CaseIterable {
     case system
     case microphone
 }
@@ -20,6 +20,7 @@ final class ReplayBuffer {
     private var systemAudio: [CMSampleBuffer] = []
     private var microphone: [CMSampleBuffer] = []
     private var retention: CMTime
+    private var isEnabled = false
     private let audioSlack = CMTime(value: 1, timescale: 1)
 
     init(seconds: Int) {
@@ -28,6 +29,16 @@ final class ReplayBuffer {
 
     func setRetention(seconds: Int) {
         lock.withLock { retention = CMTime(value: CMTimeValue(seconds), timescale: 1) }
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        lock.withLock {
+            isEnabled = enabled
+            guard !enabled else { return }
+            video.removeAll()
+            systemAudio.removeAll()
+            microphone.removeAll()
+        }
     }
 
     func reset() {
@@ -40,6 +51,7 @@ final class ReplayBuffer {
 
     func appendVideo(_ sample: CMSampleBuffer) {
         lock.withLock {
+            guard isEnabled else { return }
             video.append(sample)
             pruneVideo()
         }
@@ -47,6 +59,7 @@ final class ReplayBuffer {
 
     func appendAudio(_ sample: CMSampleBuffer, track: AudioTrack) {
         lock.withLock {
+            guard isEnabled else { return }
             switch track {
             case .system:
                 systemAudio.append(sample)

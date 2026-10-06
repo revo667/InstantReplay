@@ -49,13 +49,15 @@ struct MenuView: View {
                     Image(systemName: "square.and.arrow.down")
                     Text(Settings.saveActionLabel(controller.bufferSeconds))
                     Spacer()
-                    Text(controller.shortcut.displayString).foregroundStyle(.secondary)
+                    Text(controller.shortcut(for: .saveReplay).displayString).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(controller.state != .recording)
+            .disabled(controller.state != .recording || !controller.wantsCapture)
+
+            recordButton
 
             if let errorMessage = controller.errorMessage {
                 Text(errorMessage)
@@ -79,6 +81,37 @@ struct MenuView: View {
                 .font(.caption)
             }
         }
+    }
+
+    private var recordButton: some View {
+        Button {
+            controller.toggleRecording()
+        } label: {
+            HStack {
+                Image(systemName: controller.isRecording ? "stop.fill" : "record.circle")
+                if let startedAt = controller.recordingStartedAt {
+                    Text("Stop recording")
+                    TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                        Text(elapsedText(since: startedAt, now: context.date))
+                            .monospacedDigit()
+                    }
+                } else {
+                    Text("Start recording")
+                }
+                Spacer()
+                Text(controller.shortcut(for: .toggleRecording).displayString).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(controller.isRecording ? .red : nil)
+        .disabled(controller.needsPermission || controller.state == .starting && !controller.isRecording)
+    }
+
+    private func elapsedText(since start: Date, now: Date) -> String {
+        Duration.seconds(max(0, now.timeIntervalSince(start).rounded(.down)))
+            .formatted(.time(pattern: .hourMinuteSecond))
     }
 
     private var videoSection: some View {
@@ -133,7 +166,7 @@ struct MenuView: View {
                 }
                 Slider(value: $controller.bitRateMbps, in: Settings.bitRateRange)
                     .disabled(!controller.codec.usesBitRate)
-                Text("Uses ≈ \(controller.estimatedMemoryMB) MB of RAM. Changing resolution, frame rate, codec or microphone restarts the buffer.")
+                Text(captureNote)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -150,29 +183,31 @@ struct MenuView: View {
                 isOn: $controller.includesSystemAudio,
                 volume: $controller.systemVolume,
                 range: 0...1
-            )
+            ) { EmptyView() }
             audioControl(
                 title: "Microphone",
                 icon: "mic.fill",
                 isOn: $controller.includesMicrophone,
                 volume: $controller.microphoneVolume,
                 range: 0...2
-            )
+            ) { microphonePicker }
         }
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Save shortcut")
-                Spacer()
-                ShortcutField(controller: controller)
-            }
-            if let shortcutError = controller.shortcutError {
-                Text(shortcutError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+            ForEach(ShortcutAction.allCases) { action in
+                HStack {
+                    Text(action.title)
+                    Spacer()
+                    ShortcutField(controller: controller, action: action)
+                }
+                if let shortcutError = controller.shortcutErrors[action] {
+                    Text(shortcutError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Toggle("Launch at login", isOn: Binding(
                 get: { controller.launchAtLogin },
@@ -191,24 +226,57 @@ struct MenuView: View {
         }
     }
 
+    private var captureNote: String {
+        let restartNote = controller.isRecording
+            ? "Changing resolution, frame rate, codec or microphone starts a new part file."
+            : "Changing resolution, frame rate, codec or microphone restarts the buffer."
+        return "Uses ≈ \(controller.estimatedMemoryMB) MB of RAM. Recordings use ≈ \(controller.recordingMegabytesPerMinute) MB per minute of disk. \(restartNote)"
+    }
+
     private var bitRateText: String {
         controller.codec.usesBitRate
             ? "\(controller.roundedBitRateMbps) Mbps"
             : "≈ \(Int(controller.effectiveBitRateMbps)) Mbps"
     }
 
-    private func audioControl(
+    private var microphonePicker: some View {
+        Menu {
+            Picker("Input", selection: $controller.microphoneID) {
+                Text("System Default").tag("")
+                if !controller.microphoneID.isEmpty && controller.selectedMicrophone == nil {
+                    Text("Disconnected device").tag(controller.microphoneID)
+                }
+                Divider()
+                ForEach(controller.microphones) { input in
+                    Text(input.name).tag(input.id)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            Image(systemName: "chevron.up.chevron.down")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onAppear { controller.refreshMicrophones() }
+        .help("Input: \(controller.selectedMicrophone?.name ?? "System Default")")
+    }
+
+    private func audioControl<Accessory: View>(
         title: String,
         icon: String,
         isOn: Binding<Bool>,
         volume: Binding<Double>,
-        range: ClosedRange<Double>
+        range: ClosedRange<Double>,
+        @ViewBuilder accessory: () -> Accessory
     ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
+            HStack(spacing: 6) {
                 Toggle(isOn: isOn) {
                     Label(title, systemImage: icon)
                 }
+                accessory()
                 Spacer()
                 Text("\(Int((volume.wrappedValue * 100).rounded()))%")
                     .monospacedDigit()
@@ -247,6 +315,7 @@ struct MenuView: View {
         switch controller.state {
         case .off: "Off"
         case .starting: "Starting…"
+        case .recording where !controller.wantsCapture: "Replay off · Recording to disk"
         case .recording: "Recording · \(controller.quality.label) · \(controller.frameRate) fps · \(controller.codec.label)"
         case .saving: "Saving clip…"
         }
@@ -255,49 +324,57 @@ struct MenuView: View {
 
 struct ShortcutField: View {
     @ObservedObject var controller: ReplayController
+    let action: ShortcutAction
     @StateObject private var monitor = KeyDownMonitor()
+
+    private var isEditing: Bool {
+        controller.editingShortcut == action
+    }
 
     var body: some View {
         HStack(spacing: 4) {
             Button {
-                controller.isRecordingShortcut ? cancelRecording() : startRecording()
+                isEditing ? cancelEditing() : startEditing()
             } label: {
-                Text(controller.isRecordingShortcut ? "Press keys…" : controller.shortcut.displayString)
+                Text(isEditing ? "Press keys…" : controller.shortcut(for: action).displayString)
                     .monospacedDigit()
                     .frame(minWidth: 90)
             }
-            .help(controller.isRecordingShortcut ? "Press a new shortcut, or Esc to cancel" : "Click to change the shortcut")
+            .help(isEditing ? "Press a new shortcut, or Esc to cancel" : "Click to change the shortcut")
 
-            if !controller.isRecordingShortcut && controller.shortcut != .default {
+            if !isEditing && controller.shortcut(for: action) != action.defaultShortcut {
                 Button {
-                    controller.resetShortcut()
+                    controller.resetShortcut(for: action)
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .buttonStyle(.borderless)
-                .help("Reset to \(Shortcut.default.displayString)")
+                .help("Reset to \(action.defaultShortcut.displayString)")
             }
         }
-        .onDisappear(perform: cancelRecording)
+        .onChange(of: controller.editingShortcut) { _, editing in
+            if editing != action { monitor.stop() }
+        }
+        .onDisappear(perform: cancelEditing)
     }
 
-    private func startRecording() {
-        controller.beginShortcutRecording()
+    private func startEditing() {
+        controller.beginShortcutEditing(action)
         monitor.start { event in
             MainActor.assumeIsolated { handle(event) }
             return nil
         }
     }
 
-    private func cancelRecording() {
+    private func cancelEditing() {
         monitor.stop()
-        controller.cancelShortcutRecording()
+        if isEditing { controller.cancelShortcutEditing() }
     }
 
     private func handle(_ event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if Int(event.keyCode) == kVK_Escape && modifiers.isEmpty {
-            cancelRecording()
+            cancelEditing()
             return
         }
         guard let shortcut = Shortcut(event: event) else {
@@ -305,7 +382,7 @@ struct ShortcutField: View {
             return
         }
         monitor.stop()
-        controller.applyShortcut(shortcut)
+        controller.applyShortcut(shortcut, for: action)
     }
 }
 
